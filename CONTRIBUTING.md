@@ -25,6 +25,8 @@ The WSLg system distro is built using docker build. We essentially start from a 
 
 ## Build instructions
 
+This WSLC variant uses Podman 6.1.4 with Netavark 2.1.0 and aardvark-dns 2.1.0. Podman 6 requires Netavark 2, so the Dockerfile builds the released helpers instead of using Azure Linux 3's older Netavark RPM.
+
 0. Install and start Docker in a Linux or WSL 2 environment.
 
 ```
