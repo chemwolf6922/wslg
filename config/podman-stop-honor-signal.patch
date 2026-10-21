@@ -1,46 +1,58 @@
 diff --git a/libpod/container_api.go b/libpod/container_api.go
-index 7c95fb9..29b42b7 100644
+index b54eafa..a4fd37d 100644
 --- a/libpod/container_api.go
 +++ b/libpod/container_api.go
-@@ -293,7 +293,14 @@ func (c *Container) Stop() error {
- // StopWithTimeout is a version of Stop that allows a timeout to be specified
- // manually. If timeout is 0, SIGKILL will be used immediately to kill the
- // container.
--func (c *Container) StopWithTimeout(timeout uint) (finalErr error) {
-+func (c *Container) StopWithTimeout(timeout uint) error {
-+	return c.StopWithTimeoutAndSignal(timeout, 0)
+@@ -291,6 +291,12 @@ func (c *Container) StopWithTimeout(timeout uint) (finalErr error) {
+ 	return c.StopWithArgs(timeout, true)
+ }
+ 
++// StopWithTimeoutAndSignal overrides the configured stop signal for this request.
++// A zero signal preserves the configured default.
++func (c *Container) StopWithTimeoutAndSignal(timeout uint, signal uint) error {
++	return c.stopWithArgsAndSignal(timeout, true, signal)
 +}
 +
-+// StopWithTimeoutAndSignal is like StopWithTimeout but delivers the given signal
-+// for the graceful stop instead of the container's configured StopSignal. A
-+// signal of 0 means "use the configured StopSignal" (Docker's stop --signal).
-+func (c *Container) StopWithTimeoutAndSignal(timeout uint, signal uint) (finalErr error) {
- 	if !c.batched {
- 		c.lock.Lock()
- 		defer c.lock.Unlock()
-@@ -317,7 +324,7 @@ func (c *Container) StopWithTimeout(timeout uint) (finalErr error) {
+ // StopService stops the container without marking it as stopped by user (e.g. for
+ // systemd ExecStop). Containers with restart policy unless-stopped will be
+ // eligible to start again on next boot.
+@@ -305,7 +311,11 @@ func (c *Container) StopService(timeout uint) (finalErr error) {
+ // An explicit stop is treated as a user-driven lifecycle action. Because of
+ // that, this path may not trigger automatic restart-policy handling in cleanup,
+ // even when stoppedByUser is false.
+-func (c *Container) StopWithArgs(timeout uint, stoppedByUser bool) (finalErr error) {
++func (c *Container) StopWithArgs(timeout uint, stoppedByUser bool) error {
++	return c.stopWithArgsAndSignal(timeout, stoppedByUser, 0)
++}
++
++func (c *Container) stopWithArgsAndSignal(timeout uint, stoppedByUser bool, signal uint) (finalErr error) {
+ 	// Have to lock the pod the container is a part of.
+ 	// This prevents running `podman stop` at the same time a
+ 	// `podman pod start` is running, which could lead to weird races.
+@@ -343,7 +353,7 @@ func (c *Container) StopWithArgs(timeout uint, stoppedByUser bool) (finalErr err
+ 			return err
  		}
  	}
- 
--	return c.stop(timeout)
-+	return c.stop(timeout, signal)
+-	return c.stopInternal(timeout, stoppedByUser)
++	return c.stopInternalWithSignal(timeout, stoppedByUser, signal)
  }
  
  // Kill sends a signal to a container
 diff --git a/libpod/container_internal.go b/libpod/container_internal.go
-index ca2eee1..571d70c 100644
+index e42840b..0ff8309 100644
 --- a/libpod/container_internal.go
 +++ b/libpod/container_internal.go
-@@ -1366,7 +1366,7 @@ func (c *Container) stopWithAll() (bool, error) {
- }
- 
+@@ -1383,6 +1383,10 @@ func (c *Container) stop(timeout uint) error {
  // Internal, non-locking function to stop container
--func (c *Container) stop(timeout uint) error {
-+func (c *Container) stop(timeout uint, signal uint) error {
- 	logrus.Debugf("Stopping ctr %s (timeout %d)", c.ID(), timeout)
- 
- 	all, err := c.stopWithAll()
-@@ -1411,7 +1411,7 @@ func (c *Container) stop(timeout uint) error {
+ // stoppedByUser controls whether to set the StoppedByUser state field.
+ func (c *Container) stopInternal(timeout uint, stoppedByUser bool) error {
++	return c.stopInternalWithSignal(timeout, stoppedByUser, 0)
++}
++
++func (c *Container) stopInternalWithSignal(timeout uint, stoppedByUser bool, signal uint) error {
+ 	// This is explicit container stop that flows pass through Running -> Stopping -> Stopped/Exited states.
+ 	// As a result, this does not satisfy the Running/Paused -> Stopped/Exited
+ 	// transition that is required to trigger restart policy during cleanup.
+@@ -1435,7 +1439,7 @@ func (c *Container) stopInternal(timeout uint, stoppedByUser bool) error {
  		c.lock.Unlock()
  	}
  
@@ -49,26 +61,17 @@ index ca2eee1..571d70c 100644
  
  	if !c.batched {
  		c.lock.Lock()
-@@ -1480,7 +1480,7 @@ func (c *Container) waitForConmonToExitAndSave() error {
+@@ -1504,7 +1508,7 @@ func (c *Container) waitForConmonToExitAndSave() error {
  				// this to get the real exit code... But I'm not
  				// that dedicated.
- 				all, _ := c.stopWithAll()
+ 				all := c.stopWithAll()
 -				if err := c.ociRuntime.StopContainer(c, 0, all); err != nil {
 +				if err := c.ociRuntime.StopContainer(c, 0, 0, all); err != nil {
  					logrus.Errorf("Error stopping container %s after Conmon exited prematurely: %v", c.ID(), err)
  				}
  			}
-@@ -1586,7 +1586,7 @@ func (c *Container) restartWithTimeout(ctx context.Context, timeout uint) (retEr
- 	c.newContainerEvent(events.Restart)
- 
- 	if c.state.State == define.ContainerStateRunning {
--		if err := c.stop(timeout); err != nil {
-+		if err := c.stop(timeout, 0); err != nil {
- 			return err
- 		}
- 
 diff --git a/libpod/oci.go b/libpod/oci.go
-index e0d7406..b34011f 100644
+index fa7b10d..1074f06 100644
 --- a/libpod/oci.go
 +++ b/libpod/oci.go
 @@ -44,7 +44,7 @@ type OCIRuntime interface { //nolint:interfacebloat
@@ -81,10 +84,10 @@ index e0d7406..b34011f 100644
  	DeleteContainer(ctr *Container) error
  	// PauseContainer pauses the given container.
 diff --git a/libpod/oci_conmon_common.go b/libpod/oci_conmon_common.go
-index 8aa103f..a44933b 100644
+index af5872f..1c00b94 100644
 --- a/libpod/oci_conmon_common.go
 +++ b/libpod/oci_conmon_common.go
-@@ -323,7 +323,7 @@ func (r *ConmonOCIRuntime) killContainer(ctr *Container, signal uint, all, captu
+@@ -316,7 +316,7 @@ func (r *ConmonOCIRuntime) killContainer(ctr *Container, signal uint, all, captu
  // after to pull the exit code.
  // IMPORTANT: Thus function is called from an unlocked container state in
  // the stop() code path so do not modify the state here.
@@ -93,7 +96,7 @@ index 8aa103f..a44933b 100644
  	logrus.Debugf("Stopping container %s (PID %d)", ctr.ID(), ctr.state.PID)
  
  	// Ping the container to see if it's alive
-@@ -374,7 +374,10 @@ func (r *ConmonOCIRuntime) StopContainer(ctr *Container, timeout uint, all bool)
+@@ -366,7 +366,10 @@ func (r *ConmonOCIRuntime) StopContainer(ctr *Container, timeout uint, all bool)
  	}
  
  	if timeout > 0 {
@@ -106,33 +109,20 @@ index 8aa103f..a44933b 100644
  			stopSignal = uint(syscall.SIGTERM)
  		}
 diff --git a/libpod/oci_missing.go b/libpod/oci_missing.go
-index 98eb91e..fc679b0 100644
+index 37898e6..7b39580 100644
 --- a/libpod/oci_missing.go
 +++ b/libpod/oci_missing.go
-@@ -95,7 +95,7 @@ func (r *MissingRuntime) KillContainer(ctr *Container, signal uint, all bool) er
+@@ -95,7 +95,7 @@ func (r *MissingRuntime) KillContainer(_ *Container, _ uint, _ bool) error {
  }
  
  // StopContainer is not available as the runtime is missing
--func (r *MissingRuntime) StopContainer(ctr *Container, timeout uint, all bool) error {
-+func (r *MissingRuntime) StopContainer(ctr *Container, timeout uint, signal uint, all bool) error {
+-func (r *MissingRuntime) StopContainer(_ *Container, _ uint, _ bool) error {
++func (r *MissingRuntime) StopContainer(_ *Container, _ uint, _ uint, _ bool) error {
  	return r.printError()
  }
  
-diff --git a/libpod/runtime_ctr.go b/libpod/runtime_ctr.go
-index 87d8484..dc1c0bd 100644
---- a/libpod/runtime_ctr.go
-+++ b/libpod/runtime_ctr.go
-@@ -921,7 +921,7 @@ func (r *Runtime) removeContainer(ctx context.Context, c *Container, opts ctrRmO
- 		}
- 		// Ignore ErrConmonDead - we couldn't retrieve the container's
- 		// exit code properly, but it's still stopped.
--		if err := c.stop(time); err != nil && !errors.Is(err, define.ErrConmonDead) {
-+		if err := c.stop(time, 0); err != nil && !errors.Is(err, define.ErrConmonDead) {
- 			retErr = fmt.Errorf("cannot remove container %s as it could not be stopped: %w", c.ID(), err)
- 			return
- 		}
 diff --git a/pkg/api/handlers/compat/containers_stop.go b/pkg/api/handlers/compat/containers_stop.go
-index 208c33f..b6cdace 100644
+index 0e14596..c9e14a1 100644
 --- a/pkg/api/handlers/compat/containers_stop.go
 +++ b/pkg/api/handlers/compat/containers_stop.go
 @@ -25,9 +25,10 @@ func StopContainer(w http.ResponseWriter, r *http.Request) {
@@ -158,46 +148,37 @@ index 208c33f..b6cdace 100644
  	if utils.IsLibpodRequest(r) {
  		if _, found := r.URL.Query()["timeout"]; found {
 diff --git a/pkg/domain/entities/containers.go b/pkg/domain/entities/containers.go
-index 105b091..820abf3 100644
+index 6b13013..c1a3654 100644
 --- a/pkg/domain/entities/containers.go
 +++ b/pkg/domain/entities/containers.go
-@@ -99,6 +99,9 @@ type StopOptions struct {
+@@ -102,6 +102,7 @@ type StopOptions struct {
  	Ignore  bool
  	Latest  bool
  	Timeout *uint
-+	// Signal optionally overrides the container's configured StopSignal for the
-+	// graceful stop (Docker's `stop --signal`). Empty means use StopSignal.
-+	Signal string
++	Signal  string
  }
  
  type StopReport struct {
 diff --git a/pkg/domain/infra/abi/containers.go b/pkg/domain/infra/abi/containers.go
-index 5b9481d..4186902 100644
+index 7550595..4e93a8d 100644
 --- a/pkg/domain/infra/abi/containers.go
 +++ b/pkg/domain/infra/abi/containers.go
-@@ -271,13 +271,22 @@ func (ic *ContainerEngine) ContainerStop(ctx context.Context, namesOrIds []strin
- 		libpodContainers = append(libpodContainers, containers[i].Container)
- 	}
+@@ -386,7 +386,17 @@ func (ic *ContainerEngine) containerStopImpl(ctx context.Context, namesOrIds []s
+ }
  
-+	var sig uint // 0 = use the container's configured StopSignal
+ func (ic *ContainerEngine) ContainerStop(ctx context.Context, namesOrIds []string, options entities.StopOptions) ([]*entities.StopReport, error) {
+-	return ic.containerStopImpl(ctx, namesOrIds, options, func(c *libpod.Container, t uint) error { return c.StopWithTimeout(t) })
++	var stopSignal uint
 +	if options.Signal != "" {
-+		s, err := signal.ParseSignalNameOrNumber(options.Signal)
++		sig, err := signal.ParseSignalNameOrNumber(options.Signal)
 +		if err != nil {
 +			return nil, err
 +		}
-+		sig = uint(s)
++		stopSignal = uint(sig)
 +	}
-+
- 	errMap, err := parallelctr.ContainerOp(ctx, libpodContainers, func(c *libpod.Container) error {
- 		var err error
-+		timeout := c.StopTimeout()
- 		if options.Timeout != nil {
--			err = c.StopWithTimeout(*options.Timeout)
--		} else {
--			err = c.Stop()
-+			timeout = *options.Timeout
- 		}
-+		err = c.StopWithTimeoutAndSignal(timeout, sig)
- 		if err != nil {
- 			switch {
- 			case errors.Is(err, define.ErrCtrStopped):
++	return ic.containerStopImpl(ctx, namesOrIds, options, func(c *libpod.Container, t uint) error {
++		return c.StopWithTimeoutAndSignal(t, stopSignal)
++	})
+ }
+ 
+ func (ic *ContainerEngine) ContainerStopService(ctx context.Context, namesOrIds []string, options entities.StopOptions) ([]*entities.StopReport, error) {

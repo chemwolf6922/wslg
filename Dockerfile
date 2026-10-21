@@ -320,30 +320,16 @@ RUN ./autogen.sh && \
     echo 'crun:' ${CRUN_VERSION} >> /work/versions.txt
 
 # Build podman from source
-ARG PODMAN_VERSION=v5.4.0
-RUN git clone --depth 1 --branch ${PODMAN_VERSION} https://github.com/containers/podman.git /work/podman
+ARG PODMAN_VERSION=v6.1.4
+RUN git clone --depth 1 --branch ${PODMAN_VERSION} https://github.com/podman-container-tools/podman.git /work/podman
 WORKDIR /work/podman
-# Size exec PTYs at creation. Unlike dockerd, upstream podman drops the exec
-# ConsoleSize from the API and only sizes the PTY via an asynchronous resize,
-# which a one-shot exec (e.g. `stty size`) reads too late. This patch threads
-# the requested ConsoleSize into the exec OCI process spec so crun sizes the
-# PTY before the process starts. See config/podman-exec-consolesize.patch.
-COPY config/podman-exec-consolesize.patch /work/podman-exec-consolesize.patch
-RUN git apply /work/podman-exec-consolesize.patch
+# Podman 6.1.4 includes the exec ConsoleSize and anonymous-volume prune fixes.
 # Honor the container domainname. Unlike dockerd, upstream podman's compat
 # /containers/create drops the Docker "Domainname" field (its specgen has no
 # Domainname), so $(domainname) resolves to "(none)". This patch threads the
 # domainname into the OCI spec so crun sets it. See config/podman-domainname.patch.
 COPY config/podman-domainname.patch /work/podman-domainname.patch
 RUN git apply /work/podman-domainname.patch
-# Give `volume prune` Docker-compatible semantics. podman 5.4.0 always prunes
-# every unused volume and rejects the Docker "all" filter (HTTP 500), so a plain
-# prune cannot preserve named volumes. This patch normalizes the compat
-# /volumes/prune filters (all=true -> prune everything; no filter -> prune only
-# anonymous) and adds the "anonymous" prune filter. See
-# config/podman-volume-prune-anonymous.patch.
-COPY config/podman-volume-prune-anonymous.patch /work/podman-volume-prune-anonymous.patch
-RUN git apply /work/podman-volume-prune-anonymous.patch
 # Honor an explicit stop-signal override. Unlike dockerd (API v1.42+), podman's
 # compat /containers/{id}/stop ignores the "signal" query parameter and always
 # uses the container's configured StopSignal. This patch threads a per-request
