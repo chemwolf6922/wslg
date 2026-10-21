@@ -349,14 +349,24 @@ RUN make BUILDTAGS="seccomp exclude_graphdriver_btrfs exclude_graphdriver_device
           ${DESTDIR}${PREFIX}/libexec/podman/quadlet && \
     echo 'podman:' ${PODMAN_VERSION} >> /work/versions.txt
 
+# Podman 6 requires Netavark 2; Azure Linux 3's packaged Netavark is too old.
+ARG NETAVARK_VERSION=v2.1.0
+RUN tdnf install -y protobuf
+RUN git clone --depth 1 --branch ${NETAVARK_VERSION} https://github.com/containers/netavark.git /work/netavark
+WORKDIR /work/netavark
+RUN cargo build --locked --release --bin netavark && \
+    install -D -m 755 target/release/netavark ${DESTDIR}${PREFIX}/libexec/podman/netavark && \
+    strip ${DESTDIR}${PREFIX}/libexec/podman/netavark && \
+    echo 'netavark:' ${NETAVARK_VERSION} >> /work/versions.txt
+
 # Build aardvark-dns (Rust binary; provides container-name DNS resolution for
 # podman's netavark networking). Not in the Azure Linux repos, so we build from
 # source. Install path is /usr/libexec/podman/aardvark-dns — the location
 # netavark looks for it by default.
-ARG AARDVARK_VERSION=v1.14.0
+ARG AARDVARK_VERSION=v2.1.0
 RUN git clone --depth 1 --branch ${AARDVARK_VERSION} https://github.com/containers/aardvark-dns.git /work/aardvark-dns
 WORKDIR /work/aardvark-dns
-RUN cargo build --release && \
+RUN cargo build --locked --release && \
     install -D -m 755 target/release/aardvark-dns ${DESTDIR}${PREFIX}/libexec/podman/aardvark-dns && \
     strip ${DESTDIR}${PREFIX}/libexec/podman/aardvark-dns && \
     echo 'aardvark-dns:' ${AARDVARK_VERSION} >> /work/versions.txt
@@ -421,7 +431,6 @@ RUN echo "== Install Core/UI Runtime Dependencies ==" && \
             iproute \
             nftables \
             conmon \
-            netavark \
             gpgme \
             libseccomp \
             libassuan \
